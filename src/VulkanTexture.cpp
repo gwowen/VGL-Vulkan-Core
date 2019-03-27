@@ -75,6 +75,13 @@ namespace vgl
     {
       auto &mm = *instance->getMemoryManager();
 
+      //trying out a new policy of always keeping outgoing-handles around until next frame completes
+      if(imageHandle)
+      {
+        uint64_t frameId = instance->getSwapChain()->getCurrentFrameId();
+        retainResourcesUntilFrameCompletion(frameId);
+      }
+
       if(imageHandle && imageHandle->release())
         delete imageHandle;
       if(stagingBufferHandle && stagingBufferHandle->release())
@@ -90,6 +97,18 @@ namespace vgl
 
     void VulkanTexture::putDescriptor(VkDescriptorSet set, uint32_t binding, uint32_t arrayElement)
     {
+      if(deferImageCreation && !imageHandle)
+      {
+        createImage();
+        for(int i = 0; i < numArrayLayers; i++)
+          copyToImage(i, instance->getTransferCommandBuffer().first);
+
+        createImageView();
+        createSampler();
+
+        imageHandle = VulkanAsyncResourceHandle::newImage(instance->getResourceMonitor(), device, image, imageView, imageAllocation);
+      }
+
       //sampler out of date?
       if(samplerDirty)
       {
@@ -150,15 +169,21 @@ namespace vgl
 
       if(shouldReinit)
       {
+        //trying out a new policy of always keeping outgoing-handles around until next frame completes
+        if(imageHandle)
+        {
+          uint64_t frameId = instance->getSwapChain()->getCurrentFrameId();
+          retainResourcesUntilFrameCompletion(frameId);
+        }
+
         if(stagingBufferHandle->release())
           delete stagingBufferHandle;
+        stagingBufferHandle = nullptr;
         stagingBuffer = VK_NULL_HANDLE;
 
         if(imageHandle->release())
-        {
           delete imageHandle;
-          imageHandle = nullptr;
-        }
+        imageHandle = nullptr;
       }
 
       if(type != TT_CUBE_MAP)
@@ -170,10 +195,9 @@ namespace vgl
         return;
 
       VkBufferCreateInfo bufferInfo = {};
-      VkMemoryRequirements memRequirements;
       VulkanMemoryManager::Suballocation alloc;
 
-      if(!stagingBuffer || !stagingBufferTransferDst)
+      if(!stagingBuffer)
       {
         if(stagingBufferHandle && stagingBufferHandle->release())
           delete stagingBufferHandle;
@@ -193,48 +217,8 @@ namespace vgl
         else
           numMipLevels = 1;
 
-        VkImageCreateInfo imageInfo = {};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        switch(type)
-        {
-          case TT_1D:
-            imageInfo.imageType = VK_IMAGE_TYPE_1D;
-          break;
-          case TT_2D:
-            imageInfo.imageType = VK_IMAGE_TYPE_2D;
-          break;
-          case TT_CUBE_MAP:
-            numArrayLayers = 6;
-            imageInfo.imageType = VK_IMAGE_TYPE_2D;
-          break;
-        }
-        imageInfo.extent.width = width;
-        imageInfo.extent.height = height;
-        imageInfo.extent.depth = depth;
-        imageInfo.format = format;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.arrayLayers = numArrayLayers;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageInfo.samples = samplesToSampleCountBits(numSamples);
-        imageInfo.mipLevels = numMipLevels;
-        if(type == TT_CUBE_MAP)
-          imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-
-        if(mipmapEnabled)
-          imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-
-        if(vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS)
-          throw std::runtime_error("Failed to create Vulkan image!");
-
-        vkGetImageMemoryRequirements(device, image, &memRequirements);
-
-        alloc = instance->getMemoryManager()->allocate(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-          memRequirements.size, memRequirements.alignment, true);
-        imageAllocation = alloc;
-
-        vkBindImageMemory(device, image, alloc.memory, alloc.offset);
+        if(!deferImageCreation)
+          createImage();
       }
 
       alloc = stagingBufferAllocation;
@@ -248,14 +232,17 @@ namespace vgl
 
       isShaderRsrc = true;
 
-      copyToImage(layerIndex, transferCommandBuffer);
-
-      if(newImage)
+      if(!deferImageCreation)
       {
-        createImageView();
-        createSampler();
+        if(newImage)
+        {
+          createImageView();
+          createSampler();
 
-        imageHandle = VulkanAsyncResourceHandle::newImage(instance->getResourceMonitor(), device, image, imageView, imageAllocation);
+          imageHandle = VulkanAsyncResourceHandle::newImage(instance->getResourceMonitor(), device, image, imageView, imageAllocation);
+        }
+
+        copyToImage(layerIndex, transferCommandBuffer);
       }
     }
 
@@ -263,24 +250,31 @@ namespace vgl
     {
       bool shouldReinit = false;
 
-      if(stagingBuffer || type == TT_CUBE_MAP) //not 100% sure on the non-cubemap path here
-      {
-        if(type == TT_CUBE_MAP)
-          shouldReinit = (this->width != width || this->height != height || this->format != format);
-        else
-          shouldReinit = true;
-      }
+      if(type == TT_CUBE_MAP)
+        shouldReinit = (this->width != width || this->height != height || this->format != format);
+      else
+        shouldReinit = true;
 
       if(shouldReinit)
       {
         if(stagingBufferHandle && stagingBufferHandle->release())
+        {
           delete stagingBufferHandle;
+          stagingBufferHandle = nullptr;
+        }
         stagingBuffer = VK_NULL_HANDLE;
 
-        if(imageHandle && imageHandle->release())
+        if(imageHandle)
         {
-          delete imageHandle;
-          imageHandle = nullptr;
+          //trying out a new policy of always keeping outgoing-handles around until next frame completes
+          uint64_t frameId = instance->getSwapChain()->getCurrentFrameId();
+          retainResourcesUntilFrameCompletion(frameId);
+
+          if(imageHandle->release())
+          {
+            delete imageHandle;
+            imageHandle = nullptr;
+          }
         }
       }
       else if(imageHandle)
@@ -302,6 +296,7 @@ namespace vgl
       this->numMultiSamples = (int)samplesToSampleCountBits(numSamples);
       numMipLevels = 1;
 
+      //TODO: defer this as well if deferImageCreation is true
       VkImageCreateInfo imageInfo = {};
       imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
       switch(type)
@@ -337,6 +332,8 @@ namespace vgl
         imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
       if(usage & U_SAMPLED_IMAGE)
         imageInfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+      if(readbackEnabled)
+        imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
       imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
       imageInfo.samples = samplesToSampleCountBits(numSamples);
@@ -352,6 +349,17 @@ namespace vgl
 
       alloc = instance->getMemoryManager()->allocate(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         memRequirements.size, memRequirements.alignment, true);
+      if(!alloc)
+      {
+        //must be out of GPU memory, fallback on whater we can use
+        alloc = instance->getMemoryManager()->allocate(memRequirements.memoryTypeBits, 0,
+          memRequirements.size, memRequirements.alignment, true);
+        isResident = false;
+      }
+      else
+      {
+        isResident = true;
+      }
       imageAllocation = alloc;
 
       vkBindImageMemory(device, image, alloc.memory, alloc.offset);
@@ -481,7 +489,7 @@ namespace vgl
       if(enabled)
       {
         mipmapEnabled = enabled;
-        samplerState.mipmapMode = (magFilter == ST_LINEAR_MIPMAP_LINEAR) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerState.mipmapMode = (minFilter == ST_LINEAR_MIPMAP_LINEAR) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
         samplerState.mipLodBias = lodBias;
         samplerState.minLod = 0;
         samplerState.maxLod = (float)numMipLevels;
@@ -570,6 +578,11 @@ namespace vgl
       vkCmdPipelineBarrier(transferCommandBuffer, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     }
 
+    void VulkanTexture::setReadbackEnabled(bool enabled)
+    {
+      readbackEnabled = enabled;
+    }
+
     void VulkanTexture::transitionLayout(VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t layerIndex, VkCommandBuffer transferCommandBuffer)
     {
       auto hasStencilComponent = [](VkFormat format) {
@@ -626,6 +639,23 @@ namespace vgl
         destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
       }
       else if(oldLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+      {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+
+        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      }
+
+      else if(oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+      {
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      }
+      else if(oldLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
       {
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
@@ -815,6 +845,65 @@ namespace vgl
       stagingBufferHandle = VulkanAsyncResourceHandle::newBuffer(instance->getResourceMonitor(), device, stagingBuffer, alloc);
     }
 
+    void VulkanTexture::createImage()
+    {
+      VkMemoryRequirements memRequirements;
+      VkImageCreateInfo imageInfo = {};
+
+      imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+      switch(type)
+      {
+        case TT_1D:
+          imageInfo.imageType = VK_IMAGE_TYPE_1D;
+        break;
+        case TT_2D:
+          imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        break;
+        case TT_CUBE_MAP:
+          numArrayLayers = 6;
+          imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        break;
+      }
+      imageInfo.extent.width = width;
+      imageInfo.extent.height = height;
+      imageInfo.extent.depth = depth;
+      imageInfo.format = format;
+      imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+      imageInfo.arrayLayers = numArrayLayers;
+      imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+      imageInfo.samples = (VkSampleCountFlagBits)numMultiSamples;
+      imageInfo.mipLevels = numMipLevels;
+      if(type == TT_CUBE_MAP)
+        imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+
+      if(mipmapEnabled || readbackEnabled)
+        imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+      if(vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create Vulkan image!");
+
+      vkGetImageMemoryRequirements(device, image, &memRequirements);
+      auto alloc = instance->getMemoryManager()->allocate(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        memRequirements.size, memRequirements.alignment, true);
+
+      if(!alloc)
+      {
+        //must be out of GPU memory, fallback on whatever we can use
+        alloc = instance->getMemoryManager()->allocate(memRequirements.memoryTypeBits, 0,
+          memRequirements.size, memRequirements.alignment, true);
+        isResident = false;
+      }
+      else
+      {
+        isResident = true;
+      }
+
+      imageAllocation = alloc;
+      vkBindImageMemory(device, image, alloc.memory, alloc.offset);
+    }
+
     void VulkanTexture::createImageView()
     {
       VkImageViewCreateInfo createInfo = {};
@@ -918,13 +1007,35 @@ namespace vgl
       }
       else if(instance->getCurrentTransferCommandBuffer().first)
       {
-        //by passing a null fence, we mark these resources as committed to a command buffer that hasn't
-        //been submitted yet, and the fence will be provided when the transfer buffer is finally submitted
-        auto resourceMonitor = instance->getResourceMonitor();
-        VulkanAsyncResourceCollection frameResources(resourceMonitor, (VulkanAsyncResourceHandle *)nullptr, {
-          stagingBufferHandle, imageHandle,
-        });
-        resourceMonitor->append(move(frameResources));
+        bool frame = false;
+
+#ifndef VGL_VULKAN_CORE_STANDALONE
+        auto csm = System::system().systemStateMachine()->getCoreStateMachine();
+
+        if(csm->isInsideFrame())
+          frame = true;
+#endif
+
+        if(frame)
+        {
+          uint64_t frameId = instance->getSwapChain()->getCurrentFrameId();
+          auto resourceMonitor = instance->getResourceMonitor();
+
+          VulkanAsyncResourceCollection frameResources(resourceMonitor, frameId, {
+            stagingBufferHandle, imageHandle,
+          });
+          resourceMonitor->append(move(frameResources));
+        }
+        else
+        {
+          //by passing a null fence, we mark these resources as committed to a command buffer that hasn't
+          //been submitted yet, and the fence will be provided when the transfer buffer is finally submitted
+          auto resourceMonitor = instance->getResourceMonitor();
+          VulkanAsyncResourceCollection frameResources(resourceMonitor, (VulkanAsyncResourceHandle *)nullptr, {
+            stagingBufferHandle, imageHandle,
+          });
+          resourceMonitor->append(move(frameResources));
+        }
       }
     }
 
@@ -980,14 +1091,51 @@ namespace vgl
       }
       else if(instance->getCurrentTransferCommandBuffer().first)
       {
-        //by passing a null fence, we mark these resources as committed to a command buffer that hasn't
-        //been submitted yet, and the fence will be provided when the transfer buffer is finally submitted
-        auto resourceMonitor = instance->getResourceMonitor();
-        VulkanAsyncResourceCollection frameResources(resourceMonitor, (VulkanAsyncResourceHandle *)nullptr, {
-          stagingBufferHandle, imageHandle,
+        bool frame = false;
+
+#ifndef VGL_VULKAN_CORE_STANDALONE
+        auto csm = System::system().systemStateMachine()->getCoreStateMachine();
+
+        if(csm->isInsideFrame())
+          frame = true;
+#endif
+
+        if(frame)
+        {
+          uint64_t frameId = instance->getSwapChain()->getCurrentFrameId();
+          auto resourceMonitor = instance->getResourceMonitor();
+
+          VulkanAsyncResourceCollection frameResources(resourceMonitor, frameId, {
+            stagingBufferHandle, imageHandle,
           });
-        resourceMonitor->append(move(frameResources));
+          resourceMonitor->append(move(frameResources));
+        }
+        else
+        {
+          //by passing a null fence, we mark these resources as committed to a command buffer that hasn't
+          //been submitted yet, and the fence will be provided when the transfer buffer is finally submitted
+          auto resourceMonitor = instance->getResourceMonitor();
+          VulkanAsyncResourceCollection frameResources(resourceMonitor, (VulkanAsyncResourceHandle *)nullptr, {
+            stagingBufferHandle, imageHandle,
+          });
+          resourceMonitor->append(move(frameResources));
+        }
       }
+    }
+
+    void VulkanTexture::setDeferImageCreation(bool defer)
+    {
+      deferImageCreation = defer;
+    }
+
+    void VulkanTexture::retainResourcesUntilFrameCompletion(uint64_t frameId)
+    {
+      auto resourceMonitor = instance->getResourceMonitor();
+      auto handles = (stagingBufferHandle) ? vector<VulkanAsyncResourceHandle *>{ stagingBufferHandle, samplerHandle, imageHandle } 
+                                           : vector<VulkanAsyncResourceHandle *>{ samplerHandle, imageHandle };
+
+      VulkanAsyncResourceCollection frameResources(resourceMonitor, frameId, handles);
+      resourceMonitor->append(move(frameResources));
     }
 
 #ifndef VGL_VULKAN_CORE_STANDALONE

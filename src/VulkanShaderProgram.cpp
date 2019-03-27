@@ -146,6 +146,13 @@ namespace vgl
       if(vkCreateShaderModule(device, &createInfo, nullptr, target) != VK_SUCCESS)
         return false;
 
+      //this invalidates the shader pipeline cache
+      if(pipelineStateCache)
+      {
+        delete pipelineStateCache;
+        pipelineStateCache = nullptr;
+      }
+
       return true;
     }
 
@@ -682,8 +689,8 @@ namespace vgl
       int index = uboIndex*numSwapchainImages + imageIndex;
       DynamicUboState &dynamicState = dynamicUboStates[index];
 
-      if(dynamicUbos->isDeviceLocal())
-        throw vgl_runtime_error("Cannot call updateDynamicUboState with device local uniform buffers (you should manually populate buffer in advance instead)");
+      //if(dynamicUbos->isDeviceLocal())
+      //  throw vgl_runtime_error("Cannot call updateDynamicUboState with device local uniform buffers (you should manually populate buffer in advance instead)");
 
       if(!dynamicState.size)
       {

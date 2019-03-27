@@ -141,6 +141,7 @@ namespace vgl
     {
       requiredDeviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
       requiredDeviceExtensions.push_back(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+      //requiredDeviceExtensions.push_back(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     }
 
     void VulkanInstance::setupDefaultDevice()
@@ -253,6 +254,10 @@ namespace vgl
         deviceFeatures.samplerAnisotropy = VK_TRUE;
       if(physicalDeviceFeatures.sampleRateShading)
         deviceFeatures.sampleRateShading = VK_TRUE;
+#ifndef MACOSX
+      if(physicalDeviceFeatures.geometryShader)
+        deviceFeatures.geometryShader = VK_TRUE;
+#endif
 
       VkDeviceCreateInfo createInfo = {};
       createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -392,8 +397,11 @@ namespace vgl
 
           if(vkGetPipelineCacheData(device, pipelineCache, &sz, data) == VK_SUCCESS)
           {
-            //TODO: ifdef VGL in here to get to caches dir
+#ifndef VGL_VULKAN_CORE_STANDALONE
+            ofstream outf(vutil::FileManager::manager().getCacheDirectory() + "/vkPipelineCache.bin", ios::binary);
+#else
             ofstream outf("vkPipelineCache.bin", ios::binary);
+#endif
             outf.write((char *)data, sz);
           }
 

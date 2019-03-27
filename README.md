@@ -1,4 +1,7 @@
 # VGL Vulkan Core
+
+![](https://vertostudio.com/img/vkcore_thumb.png)
+
 This is an open source distribution of the core that runs the Verto Studio Graphics Library (VGL) engine.
 The design goals are firstmost to support the general purpose OpenGL-like engine that powers Verto Studio 3D, a cross-platform 3D modeling application.
 Secondly, with the first goal in mind, the engine should offer reasonable high performance.  MoktenVK is a required target for this system, so certain Vulkan features will not be exposed/utilized.
@@ -9,6 +12,20 @@ somewhat complicated tasks using Vulkan and how to provide general rendering API
 a 3D modeling tool.
 
 To get an idea of how this core can be used to replace an OpenGL 3.x engine, see the example source code (ExampleRenderer.cpp & Example.cpp)
+
+## Features
+
+- First-class `VulkanSwapChain` class with implementations for windows & mac (moltenVk) surfaces
+- Built-in thread-safe memory manager & heap manager using tier-based allocation capable of providing suballocations to various resources (such as buffers, images, etc).  
+- Online GLSL compilation via shaderc built in to first-class `VulkanShaderProgram` object.
+- Simple SPV shader introspection to determine information about sampled image and uniform buffer members in built shader programs.
+- Support for per-shader dynamic UBO data updating via simple `VulkanShaderProgram::updateDynamicUboState` interface.
+- Grouped Buffer objects via first-class `VulkanBufferGroup` class.
+- Vertex array state management via first-class `VulkanVertexArray` class.
+- First-class Texture class `VulkanTexture` supporting texture initialization from image bytes (data) or uninitialized for use as a render target.
+- Fast cache-based pipeline creation by mapping POD pipeline state structs to `VulkanPipeline` objects.
+- Async reference-based resource wrapper `VulkanAsyncResourceHandle` faciliated by dedicated resource monitor (create-use-release-and-forget.  Resource monitor checks fences to determine when resources are no longer needed, and then destroys underlying vulkan resources only when safe).  
+- Example context-like `ExampleRenderer` class which demonstrates dynamic pipeline creation, on-the-fly command buffer building, and managing renderer state.
 
 ## Dependencies
 
@@ -41,13 +58,13 @@ Then, open the Example.xcode Project and build.
 
 ## How Can I Help?
 
-The project as it stands, could use a much better solution for parsing SPIRV assembly and running old-school GLSL (version 150) code on the core.  Both solutions involve a regex parsing solution that I'm not too crazy about.  The SPIRV assembly regex parser needed to perform shader introspection is decent enough, but I'm sure a better solution exists.  
+- Swapchain resizing-recreation isn't handled correctly yet.  
 
-Related to this:  The core currently lacks the ability to compile GLSL 150 and auto-conver to vulkan-enabled GLSL 450.  Currently my higher-level engine implements this (on top of this core) using tons of regex which is a giant hack.  I'd like to have a more graceful solution to this.
+- The project as it stands, could use a much better solution for parsing SPIRV assembly and running old-school GLSL (version 150) code on the core.  Both solutions involve a regex parsing solution that I'm not too crazy about.  The SPIRV assembly regex parser needed to perform shader introspection is decent enough, but I'm sure a better solution exists.  
 
-The memory manager currently does not expose or support non-coherent memory.  
+- Related to this:  The core currently lacks the ability to compile GLSL 150 and auto-conver to vulkan-enabled GLSL 450.  Currently my higher-level engine implements this (on top of this core) using tons of regex which is a giant hack.  I'd like to have a more graceful solution to this.
 
-Rendering performant OpenGL-style thick lines WITHOUT using a geometry shader would be a nice addition.
+- Rendering performant OpenGL-style thick lines WITHOUT using a geometry shader would be a nice addition.
 
 ## License
 
